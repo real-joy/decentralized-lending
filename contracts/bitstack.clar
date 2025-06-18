@@ -167,3 +167,124 @@
 (define-private (is-valid-asset (asset (string-ascii 3)))
   (is-some (index-of VALID-ASSETS asset))
 )
+
+;; Price Validation
+;; Ensures price data is reasonable and non-zero
+(define-private (is-valid-price (price uint))
+  (and
+    (> price u0)
+    (<= price u1000000000000) ;; Reasonable upper bound
+  )
+)
+
+;; Loan Filtering Helper
+;; Helper function for filtering loan arrays
+(define-private (not-equal-loan-id (id uint))
+  (not (is-eq id id))
+)
+
+;; PUBLIC FUNCTIONS - PLATFORM ADMINISTRATION
+
+;; Initialize BitStack Protocol
+;; Initializes the platform - must be called before any operations
+(define-public (initialize-platform)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (not (var-get platform-initialized)) ERR-ALREADY-INITIALIZED)
+    (var-set platform-initialized true)
+    (ok true)
+  )
+)
+
+;; Update Minimum Collateral Ratio
+;; Adjusts the minimum collateral ratio requirement for new loans
+(define-public (update-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (>= new-ratio u110) ERR-INVALID-AMOUNT)
+    (var-set minimum-collateral-ratio new-ratio)
+    (ok true)
+  )
+)
+
+;; Update Liquidation Threshold
+;; Modifies the threshold at which loans become eligible for liquidation
+(define-public (update-liquidation-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (>= new-threshold u100) ERR-INVALID-AMOUNT)
+    (var-set liquidation-threshold new-threshold)
+    (ok true)
+  )
+)
+
+;; Update Oracle Price Feed
+;; Updates price data from trusted oracle sources
+(define-public (update-price-feed
+    (asset (string-ascii 3))
+    (new-price uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-asset asset) ERR-INVALID-ASSET)
+    (asserts! (is-valid-price new-price) ERR-INVALID-PRICE)
+    (ok (map-set collateral-prices { asset: asset } { price: new-price }))
+  )
+)
+
+;; PUBLIC FUNCTIONS - LENDING OPERATIONS
+
+;; Deposit Collateral
+;; Deposits Bitcoin collateral into the protocol
+(define-public (deposit-collateral (amount uint))
+  (begin
+    (asserts! (var-get platform-initialized) ERR-NOT-INITIALIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (var-set total-btc-locked (+ (var-get total-btc-locked) amount))
+    (ok true)
+  )
+)
+
+;; Request Loan Against Collateral
+;; Creates a new loan backed by deposited collateral
+(define-public (request-loan
+    (collateral uint)
+    (loan-amount uint)
+  )
+  (let (
+      (btc-price (unwrap! (get price (map-get? collateral-prices { asset: "BTC" }))
+        ERR-NOT-INITIALIZED
+      ))
+      (collateral-value (* collateral btc-price))
+      (required-collateral (* loan-amount (var-get minimum-collateral-ratio)))
+      (loan-id (+ (var-get total-loans-issued) u1))
+    )
+    (begin
+      (asserts! (var-get platform-initialized) ERR-NOT-INITIALIZED)
+      (asserts! (>= collateral-value required-collateral)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+      ;; Create new loan record
+      (map-set loans { loan-id: loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral,
+        loan-amount: loan-amount,
+        interest-rate: u5, ;; 5% annual interest rate
+        start-height: stacks-block-height,
+        last-interest-calc: stacks-block-height,
+        status: "active",
+      })
+      ;; Update user's active loans list
+      (match (map-get? user-loans { user: tx-sender })
+        existing-loans (map-set user-loans { user: tx-sender } { active-loans: (unwrap!
+          (as-max-len? (append (get active-loans existing-loans) loan-id) u10)
+          ERR-INVALID-AMOUNT
+        ) }
+        )
+        (map-set user-loans { user: tx-sender } { active-loans: (list loan-id) })
+      )
+      (var-set total-loans-issued (+ (var-get total-loans-issued) u1))
+      (ok loan-id)
+    )
+  )
+)
